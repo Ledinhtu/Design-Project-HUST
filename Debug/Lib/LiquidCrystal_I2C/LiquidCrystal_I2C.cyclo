@@ -1,0 +1,17 @@
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:6:13:lcd_send_cmd	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:19:13:lcd_send_data	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:31:6:lcd_putchar	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:36:6:lcd_clear_display	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:41:6:lcd_display_off	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:46:6:lcd_display_on	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:52:6:lcd_backlight_on	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:58:6:lcd_backlight_off	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:64:6:lcd_set_cursor	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:70:6:lcd_set_cursor_on	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:75:6:lcd_set_cursor_off	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:82:6:lcd_set_cursor_blink_on	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:88:6:lcd_set_cursor_blink_off	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:93:6:lcd_create_char	2
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:101:6:lcd_write	1
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:105:6:lcd_printf	3
+../Lib/LiquidCrystal_I2C/LiquidCrystal_I2C.c:119:6:lcd_init	1
