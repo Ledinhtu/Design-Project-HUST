@@ -9,6 +9,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <math.h>
 
 /* USER CODE END Includes */
 
@@ -48,12 +50,22 @@ typedef struct
 	uint32_t ppm;
 } MQSensor_Typdef;
 
+typedef struct
+{
+	I2C_HandleTypeDef *hi2c;
+	uint16_t SensAddress;
+	float temp;
+	float humi;
+} AHTSensor_Typdef;
+
 #pragma pack(1)
 typedef struct {
 	uint8_t flag;
 	RTC_TimeTypeDef sTime;
 	RTC_DateTypeDef sDate;
 	uint32_t ppm;
+	float humi;
+	float tem;
 } Sensor_Data_Typdef;
 #pragma pack(1)
 
@@ -69,13 +81,16 @@ typedef struct {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define RTC_BKP_SET_TIME 0x2606
-#define LEL 1000
+#define EL 5000
 #define SHORT_PRESS_TIME 1000
 #define HOLD_DOWN_TIME 3000
+#define AHT10_ADDR 0x38
 
 #define sizeofBuff 20
 
 #define ADDRESS_DATA_STORAGE (0x08000000 + 63*1024)
+
+#define SEND_TEST
 
 /* USER CODE END PD */
 
@@ -101,6 +116,7 @@ uint8_t hold_count = 0;
 bool flag = false;
 Button_Typdef button1;
 MQSensor_Typdef MQSensor;
+AHTSensor_Typdef AHTSensor;
 StateDevice_Typdef stateDevice = INIT;
 Sensor_Data_Typdef data;
 
@@ -110,6 +126,11 @@ bool uart_flag = false;
 bool ext_param = false;
 bool disp_flag = true;
 uint8_t ret;
+
+float R0;
+float Rs;
+float RL = 1;
+uint32_t var_EL = EL;
 
 uint8_t arr_w[10] = {1,2,3,4,5,6,7,8,9,10};
 uint8_t arr_r[10];
@@ -133,6 +154,9 @@ void MQSensor_Init(MQSensor_Typdef *sensor, GPIO_TypeDef *HT_GPIOx, uint16_t HT_
 HAL_StatusTypeDef MQSensor_get_adc(MQSensor_Typdef *sensor);
 void MQSensor_powerOn(MQSensor_Typdef *sensor, bool power);
 void MQSensor_calc(MQSensor_Typdef *sensor);
+
+void AHTSensor_Init(AHTSensor_Typdef *sensor, I2C_HandleTypeDef *hi2c, uint16_t SensAddress);
+void AHTSensor_Read(AHTSensor_Typdef *sensor);
 
 void btn_pressing_callback(Button_Typdef *ButtonX);
 void btn_press_short_callback(Button_Typdef *ButtonX);
@@ -164,6 +188,8 @@ int	Flash_Read_Int(uint32_t address);
 float Flash_Read_Fload(uint32_t address);
 HAL_StatusTypeDef Flash_Read_Array(uint32_t address, uint8_t *arr,  uint16_t len);
 HAL_StatusTypeDef Flash_Read_Struct(uint32_t address, Sensor_Data_Typdef *data);
+
+HAL_StatusTypeDef sendUart(UART_HandleTypeDef *huart, const char* str, ...);
 
 /* USER CODE END PFP */
 
@@ -317,8 +343,45 @@ void MQSensor_powerOn(MQSensor_Typdef *sensor, bool power)
 
 void MQSensor_calc(MQSensor_Typdef *sensor)
 {
-	sensor->ppm = sensor->adc_value;
+//	sensor->ppm = sensor->adc_value;
+	Rs = 5*RL/((float)MQSensor.adc_value*3.3/4095)-RL;
+	float y = Rs/R0;
+	sensor->ppm = pow(10, (log(y)-0.85)/(-0.56));
 
+}
+
+void AHTSensor_Init(AHTSensor_Typdef *sensor, I2C_HandleTypeDef *hi2c, uint16_t SensAddress)
+{
+	sensor->SensAddress = SensAddress;
+	sensor->hi2c = hi2c;
+
+	uint8_t cmd[3];
+	cmd[0] = 0xA8;
+	cmd[1] = 0x00;
+	cmd[2] = 0x00;
+	HAL_I2C_Master_Transmit(sensor->hi2c, SensAddress<<1, cmd, 3, 1000);
+	HAL_Delay(450);
+
+	cmd[0] = 0xE1;
+	cmd[1] = 0x08;
+	cmd[2] = 0x00;
+	HAL_I2C_Master_Transmit(sensor->hi2c, SensAddress<<1, cmd, 3, 1000);
+	HAL_Delay(450);
+
+}
+
+void AHTSensor_Read(AHTSensor_Typdef *sensor)
+{
+	uint8_t cmd[3];
+	uint8_t buff[6];
+	cmd[0] = 0xAC;
+	cmd[1] = 0x08;
+	cmd[2] = 0x00;
+	HAL_I2C_Master_Transmit(sensor->hi2c, sensor->SensAddress<<1, cmd, 3, 1000);
+	HAL_Delay(300);
+	HAL_I2C_Master_Receive(sensor->hi2c, sensor->SensAddress<<1, buff, 6, 1000);
+	sensor->humi = (buff[1]<<12 | buff[2]<<4 | (buff[3] & 0xf0) >> 4) * 100.0 / (1 << 20);
+	sensor->temp = ((buff[3] & 0xf) << 16 | buff[4] << 8 | buff[5]) * 200.0 / (1 << 20) - 55;
 }
 
 MLB_EraseError Flash_Earse(uint32_t address)
@@ -421,7 +484,7 @@ void measuring_display(bool isCpltMeas)
 	{
 		lcd_clear_display(&hlcd);
 		lcd_set_cursor(&hlcd, 0, 0);
-		lcd_printf(&hlcd, "ADC value %4ld", MQSensor.adc_value);
+		lcd_printf(&hlcd, "Gas %4ld PPM", MQSensor.ppm);
 		stateDevice = IDLE;
 
 	}
@@ -440,31 +503,99 @@ void idle_display()
 
 void store_data()
 {
-	HAL_RTC_GetTime(&hrtc, &data.sTime, RTC_FORMAT_BIN);
-	HAL_RTC_GetDate(&hrtc, &data.sDate, RTC_FORMAT_BIN);
-	data.ppm = MQSensor.ppm;
+	HAL_RTC_GetTime(&hrtc, &data_w.sTime, RTC_FORMAT_BIN);
+	HAL_RTC_GetDate(&hrtc, &data_w.sDate, RTC_FORMAT_BIN);
+	data_w.ppm = MQSensor.ppm;
+	data_w.tem = AHTSensor.temp;
+	data_w.humi = AHTSensor.humi;
+	data_w.flag = 0;
+
+	uint32_t addr = HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR2);
+	Flash_Read_Struct(addr, &data_r);
+
+	if ((!addr) || (data_r.flag==0)) {
+		Flash_Earse(ADDRESS_DATA_STORAGE);
+		addr = ADDRESS_DATA_STORAGE - ((sizeof(Sensor_Data_Typdef)+1)/2)*2;
+	}
+	else if (addr > (0x08000000 + 64*1024 - 2*(((sizeof(Sensor_Data_Typdef)+1)/2)*2)))
+	{
+		Sensor_Data_Typdef data[9];
+		for (uint8_t i = 0; i < 9; ++i) {
+			Flash_Read_Struct(addr-9-i, &data[i]);
+		}
+		addr = ADDRESS_DATA_STORAGE;
+		Flash_Earse(ADDRESS_DATA_STORAGE);
+		for (uint8_t i = 0; i < 9; ++i) {
+			Flash_Write_Struct(addr, data[i]);
+			addr+=((sizeof(Sensor_Data_Typdef)+1)/2)*2;
+		}
+	}
+
+	Flash_Write_Struct(addr, data_w);
+	HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR2, addr+((sizeof(Sensor_Data_Typdef)+1)/2)*2);
 
 	// store
 }
 
 void warning()
 {
-		HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, (MQSensor.ppm > LEL) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, (MQSensor.ppm > var_EL) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 void send_OK()
 {
-	char str[] = "AHT02\n";
-	HAL_UART_Transmit(&huart1, (uint8_t*) str, strlen(str), 500);
+	char str[] = "AHT00\n";
+	HAL_UART_Transmit(&huart1, (uint8_t*) str, strlen(str), 1000);
 }
 
 void send_allData()
 {
+	uint32_t addr = HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR2);
+	if (addr==0 || addr==ADDRESS_DATA_STORAGE) {
+		sendUart(&huart1, "{}");
+		send_OK();
+		return;
+	}
+	uint32_t rate = ((sizeof(Sensor_Data_Typdef)+1)/2)*2;
+
+	Sensor_Data_Typdef data_n;
+	for (uint8_t i = 0; i < 10; ++i) {
+		if ((addr-(i+1)*rate + 0x08000000) < ADDRESS_DATA_STORAGE) break;
+		Flash_Read_Struct(addr-(i+1)*rate, &data_n);
+		sendUart(&huart1, "{\"date\":\"20%02d-%02d-%02d\",\"time\":\"%02d:%02d:%02d\",\"ppm\":%d,\"humi\":%.2f,\"tem\":%.2f}",
+				data_n.sDate.Year, data_n.sDate.Month, data_n.sDate.Date,
+				data_n.sTime.Hours, data_n.sTime.Minutes, data_n.sTime.Seconds,
+				data_n.ppm, data_n.humi, data_n.tem);
+	}
+	send_OK();
+	return;
+}
+
+HAL_StatusTypeDef sendUart(UART_HandleTypeDef *huart, const char* str, ...)
+{
+	char pData[100];
+	va_list args;
+	va_start(args, str);
+	vsprintf(pData, str, args);
+
+	va_end(args);
+	return HAL_UART_Transmit(huart, (uint8_t *)pData, strlen((char*)pData), 300);
+}
+
+HAL_StatusTypeDef printDebug(UART_HandleTypeDef *huart, char *pData, const char* str, ...)
+{
+	 va_list args;
+	 va_start(args, str);
+	 vsprintf(pData, str, args);
+
+	 va_end(args);
+	 return HAL_UART_Transmit(huart, (uint8_t *)pData, strlen((char*)pData), 1000);
 
 }
 
 HAL_StatusTypeDef send_test()
 {
+#ifdef SEND_TEST
 	RTC_TimeTypeDef sTime = {0};
 	RTC_DateTypeDef sDay = {0};
 	uint8_t tx_buff[50];
@@ -521,7 +652,12 @@ HAL_StatusTypeDef send_test()
 	sprintf((char *)tx_buff, "PPM=%ld\n", data_r.ppm);
 	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
 
+	AHTSensor_Read(&AHTSensor); // AHTSensor.humi
+//	sprintf((char *)tx_buff, "AHT: humi=%.2f temp=%.2f\n", AHTSensor.humi, AHTSensor.temp);
+	printDebug(&huart1, (char *)tx_buff, "AHT: humi=%.2f temp=%.2f\n", AHTSensor.humi, AHTSensor.temp);
+
 	return ret;
+#endif /* SEND_TEST */
 }
 
 void communicating_handle()
@@ -557,14 +693,16 @@ void communicating_handle()
 		if (!strcmp((char *)rx_buffer, "AT05")) {
 //			send_OK();
 			memset((char *)rx_buffer, '\0', sizeofBuff);
-			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
 			send_test();
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
 			return;
 		}
 
 		// all Data
 		if (!strcmp((char *)rx_buffer, "AT06")) {
 			send_allData();
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
 			return;
 		}
 
@@ -579,6 +717,16 @@ void communicating_handle()
 		// set Day
 		if (!strcmp((char *)rx_buffer, "AT07")) {
 			send_OK();
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			return;
+		}
+
+		// delete flash
+		if (!strcmp((char *)rx_buffer, "AT11")) {
+			send_OK();
+			Flash_Earse(ADDRESS_DATA_STORAGE);
+			HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR2, 0);
 			memset((char *)rx_buffer, '\0', sizeofBuff);
 			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
 			return;
@@ -648,11 +796,21 @@ int main(void)
   lcd_init(&hlcd, &hi2c2, LCD_ADDR_DEFAULT);
   button_init(&button1, GPIOA, GPIO_PIN_8);
   MQSensor_Init(&MQSensor, HT_CTRL_GPIO_Port, HT_CTRL_Pin, &hadc1, ADC_CHANNEL_0);
+  AHTSensor_Init(&AHTSensor, &hi2c1, AHT10_ADDR);
 
   stateDevice = IDLE;
 
   disp_flag = true;
   HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+  AHTSensor_Read(&AHTSensor);
+  idle_display();
+//  MQSensor_powerOn(&MQSensor, true);
+//  HAL_Delay(20000);
+//
+//  MQSensor_get_adc(&MQSensor);
+//  MQSensor_powerOn(&MQSensor, false);
+  MQSensor_get_adc(&MQSensor);
+  R0 = 5*RL/((float)MQSensor.adc_value*3.3/4095)-RL;
 
   /* USER CODE END 2 */
 
@@ -674,6 +832,7 @@ int main(void)
 			MQSensor_get_adc(&MQSensor);
 			MQSensor_calc(&MQSensor);
 			warning();
+			AHTSensor_Read(&AHTSensor);
 			measuring_display(true);
 			store_data();
 			break;
