@@ -57,6 +57,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define LED_Pin GPIO_PIN_13
+#define LED_GPIO_Port GPIOC
 #define MQ2_ADC_Pin GPIO_PIN_0
 #define MQ2_ADC_GPIO_Port GPIOA
 #define BUZZER_Pin GPIO_PIN_14
@@ -66,6 +68,10 @@ void Error_Handler(void);
 #define BTN_Pin GPIO_PIN_8
 #define BTN_GPIO_Port GPIOA
 #define BTN_EXTI_IRQn EXTI9_5_IRQn
+#define AHT10_SCL_Pin GPIO_PIN_6
+#define AHT10_SCL_GPIO_Port GPIOB
+#define AHT10_SDA_Pin GPIO_PIN_7
+#define AHT10_SDA_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

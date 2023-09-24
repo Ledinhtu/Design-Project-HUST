@@ -7,6 +7,8 @@
 /* USER CODE BEGIN Includes */
 #include "LiquidCrystal_I2C.h"
 #include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -48,20 +50,33 @@ typedef struct
 
 #pragma pack(1)
 typedef struct {
+	uint8_t flag;
 	RTC_TimeTypeDef sTime;
 	RTC_DateTypeDef sDate;
 	uint32_t ppm;
 } Sensor_Data_Typdef;
-
 #pragma pack(1)
 
+typedef struct {
+	HAL_StatusTypeDef status;
+	uint32_t pageError;
+
+} MLB_EraseError;
 
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define RTC_BKP_SET_TIME 0x2606
 #define LEL 1000
+#define SHORT_PRESS_TIME 1000
+#define HOLD_DOWN_TIME 3000
+
+#define sizeofBuff 20
+
+#define ADDRESS_DATA_STORAGE (0x08000000 + 63*1024)
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -89,7 +104,18 @@ MQSensor_Typdef MQSensor;
 StateDevice_Typdef stateDevice = INIT;
 Sensor_Data_Typdef data;
 
-uint8_t buffer[20];
+uint8_t rx_buffer[sizeofBuff];
+uint8_t tx_buffer[sizeofBuff];
+bool uart_flag = false;
+bool ext_param = false;
+bool disp_flag = true;
+uint8_t ret;
+
+uint8_t arr_w[10] = {1,2,3,4,5,6,7,8,9,10};
+uint8_t arr_r[10];
+Sensor_Data_Typdef data_r;
+Sensor_Data_Typdef data_w;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -101,16 +127,49 @@ static void MX_USART1_UART_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
+
 void MQSensor_powerOn(MQSensor_Typdef *sensor, bool power);
 void MQSensor_Init(MQSensor_Typdef *sensor, GPIO_TypeDef *HT_GPIOx, uint16_t HT_GPIO_Pin, ADC_HandleTypeDef* hadc,  uint32_t Channel);
 HAL_StatusTypeDef MQSensor_get_adc(MQSensor_Typdef *sensor);
+void MQSensor_powerOn(MQSensor_Typdef *sensor, bool power);
+void MQSensor_calc(MQSensor_Typdef *sensor);
+
+void btn_pressing_callback(Button_Typdef *ButtonX);
+void btn_press_short_callback(Button_Typdef *ButtonX);
+void btn_release_callback(Button_Typdef *ButtonX);
+void btn_press_timeout_callback(Button_Typdef *ButtonX);
+void button_init(Button_Typdef *ButtonX,GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin);
+void button_handle(Button_Typdef *ButtonX);
+
+void heating_display();
+void measuring_display(bool isCpltMeas);
+void idle_display();
+void store_data();
+void warning();
+void send_OK();
+void send_allData();
+void communicating_handle();
+void uart_handle();
+
+HAL_StatusTypeDef send_test();
+
+MLB_EraseError Flash_Earse(uint32_t address);
+
+HAL_StatusTypeDef Flash_Write_Int(uint32_t address, int value);
+void Flash_Write_Float(uint32_t address, float value);
+HAL_StatusTypeDef Flash_Write_Array(uint32_t address, uint8_t *arr,  uint16_t len);
+HAL_StatusTypeDef Flash_Write_Struct(uint32_t address, Sensor_Data_Typdef data);
+
+int	Flash_Read_Int(uint32_t address);
+float Flash_Read_Fload(uint32_t address);
+HAL_StatusTypeDef Flash_Read_Array(uint32_t address, uint8_t *arr,  uint16_t len);
+HAL_StatusTypeDef Flash_Read_Struct(uint32_t address, Sensor_Data_Typdef *data);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define SHORT_PRESS_TIME 1000
-#define HOLD_DOWN_TIME 3000
+
 void btn_pressing_callback(Button_Typdef *ButtonX)
 {
 	if (stateDevice == IDLE) {
@@ -128,16 +187,26 @@ void btn_pressing_callback(Button_Typdef *ButtonX)
 		return;
 	}
 
+	if (stateDevice == COMMUNICATING) {
+		lcd_clear_display(&hlcd);
+		stateDevice = IDLE;
+		char str[] = "AHT03\n";
+		HAL_UART_Transmit(&huart1, (uint8_t*) str, strlen(str), 500);
+		return;
+	}
+
 }
 
 void btn_press_short_callback(Button_Typdef *ButtonX)
 {
 
 }
+
 void btn_release_callback(Button_Typdef *ButtonX)
 {
 
 }
+
 void btn_press_timeout_callback(Button_Typdef *ButtonX)
 {
 	hold_count++;
@@ -248,11 +317,86 @@ void MQSensor_powerOn(MQSensor_Typdef *sensor, bool power)
 
 void MQSensor_calc(MQSensor_Typdef *sensor)
 {
-	sensor->ppm = sensor->ppm;
+	sensor->ppm = sensor->adc_value;
 
-	if (sensor->ppm > LEL) {
-		// baos dong
+}
+
+MLB_EraseError Flash_Earse(uint32_t address)
+{
+	MLB_EraseError eraseError;
+	eraseError.status = HAL_ERROR;
+	eraseError.pageError = 0;
+
+	FLASH_EraseInitTypeDef EraseInit;
+	EraseInit.Banks = FLASH_BANK_1;
+	EraseInit.TypeErase = FLASH_TYPEERASE_PAGES;
+	EraseInit.PageAddress = address;
+	EraseInit.NbPages = 1;
+
+	eraseError.status = HAL_FLASH_Unlock();
+	if(eraseError.status)
+		return eraseError;
+
+	eraseError.status = HAL_FLASHEx_Erase(&EraseInit, &eraseError.pageError);
+	if(eraseError.status)
+		return eraseError;
+
+	eraseError.status = HAL_FLASH_Lock();
+	if(eraseError.status)
+		return eraseError;
+
+	return eraseError;
+}
+
+HAL_StatusTypeDef Flash_Write_Array(uint32_t address, uint8_t *arr,  uint16_t len)
+{
+	HAL_StatusTypeDef ret = HAL_OK;
+	uint16_t *pt = (uint16_t *)arr;
+	ret = HAL_FLASH_Unlock();
+	if (ret)
+		return ret;
+	for (uint16_t i = 0; i < (len+1)/2; ++i) {
+		ret = HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, address + 2*i, *pt);
+		if (ret)
+			return ret;
+		pt++;
 	}
+	ret = HAL_FLASH_Lock();
+	if (ret)
+		return ret;
+
+	return ret;
+}
+
+HAL_StatusTypeDef Flash_Read_Array(uint32_t address, uint8_t *arr,  uint16_t len)
+{
+	HAL_StatusTypeDef ret = HAL_OK;
+	uint16_t *pt = (uint16_t *)arr;
+	ret = HAL_FLASH_Unlock();
+	if (ret)
+		return ret;
+	for (uint16_t i = 0; i < (len+1)/2; ++i) {
+		*pt = *(uint16_t *)(address + 2*i);
+		if (ret)
+			return ret;
+		pt++;
+	}
+	ret = HAL_FLASH_Lock();
+	if (ret)
+		return ret;
+	return ret;
+}
+
+HAL_StatusTypeDef Flash_Write_Struct(uint32_t address, Sensor_Data_Typdef data)
+{
+	HAL_StatusTypeDef ret = Flash_Write_Array(address, (uint8_t*)&data, sizeof(data));
+	return ret;
+}
+
+HAL_StatusTypeDef Flash_Read_Struct(uint32_t address, Sensor_Data_Typdef *data)
+{
+	HAL_StatusTypeDef ret = Flash_Read_Array(address, (uint8_t*)data, sizeof(Sensor_Data_Typdef));
+	return ret;
 }
 
 void heating_display()
@@ -273,14 +417,16 @@ void heating_display()
 
 void measuring_display(bool isCpltMeas)
 {
-	lcd_clear_display(&hlcd);
 	if (isCpltMeas)
 	{
+		lcd_clear_display(&hlcd);
 		lcd_set_cursor(&hlcd, 0, 0);
 		lcd_printf(&hlcd, "ADC value %4ld", MQSensor.adc_value);
 		stateDevice = IDLE;
+
 	}
 	else {
+		lcd_clear_display(&hlcd);
 		lcd_set_cursor(&hlcd, 0, 0);
 		lcd_printf(&hlcd, "Measuring ...");
 	}
@@ -291,7 +437,6 @@ void idle_display()
 	lcd_set_cursor(&hlcd, 1, 0);
 	lcd_printf(&hlcd, "Press to measure");
 }
-
 
 void store_data()
 {
@@ -304,14 +449,166 @@ void store_data()
 
 void warning()
 {
-		HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, (MQSensor.adc_value > 500) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, (MQSensor.ppm > LEL) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
-void communicating_handle()
+void send_OK()
+{
+	char str[] = "AHT02\n";
+	HAL_UART_Transmit(&huart1, (uint8_t*) str, strlen(str), 500);
+}
+
+void send_allData()
 {
 
 }
 
+HAL_StatusTypeDef send_test()
+{
+	RTC_TimeTypeDef sTime = {0};
+	RTC_DateTypeDef sDay = {0};
+	uint8_t tx_buff[50];
+	HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+	sprintf((char *)tx_buff, "%d:%d:%d\n", sTime.Hours , sTime.Minutes, sTime.Seconds);
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+
+	HAL_RTC_GetDate(&hrtc, &sDay, RTC_FORMAT_BIN);
+	sprintf((char *)tx_buff, "%d-%d/%d/%d\n", sDay.WeekDay , sDay.Date, sDay.Month, sDay.Year);
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+
+	uint32_t check = HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR2);
+	sprintf((char *)tx_buff, "RTC_BKP_DR2=%2ld\n", check);
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+
+	/*
+	Flash_Earse(ADDRESS_DATA_STORAGE);
+	Flash_Write_Array(ADDRESS_DATA_STORAGE, arr_w, 10);
+	Flash_Read_Array(ADDRESS_DATA_STORAGE, arr_r, 10);
+	for (uint8_t i = 0; i < 10; ++i) {
+		sprintf((char *)tx_buff, "%d\n", arr_r[i]);
+		ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 100);
+	}
+	*/
+
+	data_w.flag = 0;
+	data_w.sDate = sDay;
+	data_w.sTime = sTime;
+	data_w.ppm = MQSensor.ppm;
+	sprintf((char *)tx_buff, "Address data_w=%ld\nSzie data_w=%d\n", (uint32_t)&data_w, sizeof(data_w));
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+
+	ret = Flash_Read_Struct(check+((sizeof(Sensor_Data_Typdef)+1)/2)*2, &data_r);
+	if ((!check) || (data_r.flag==0)) {
+		Flash_Earse(ADDRESS_DATA_STORAGE);
+		check = ADDRESS_DATA_STORAGE - ((sizeof(Sensor_Data_Typdef)+1)/2)*2;
+	}
+
+//	sprintf((char *)tx_buff, "data_r.flag=%d\n!data_r.flag=%d\n", data_r.flag, !data_r.flag);
+//	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+
+	ret = Flash_Write_Struct(check+((sizeof(Sensor_Data_Typdef)+1)/2)*2, data_w);
+	HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR2, check+((sizeof(Sensor_Data_Typdef)+1)/2)*2);
+
+	check = HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR2);
+	sprintf((char *)tx_buff, "RTC_BKP_DR2=%2ld\n", check);
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+
+	ret = Flash_Read_Struct(check, &data_r);
+	sprintf((char *)tx_buff, "Time=%d:%d:%d\n", data_r.sTime.Hours , data_r.sTime.Minutes, data_r.sTime.Seconds);
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+	sprintf((char *)tx_buff, "Date=%d-%d/%d/%d\n", data_r.sDate.WeekDay , data_r.sDate.Date, data_r.sDate.Month, data_r.sDate.Year);
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+	sprintf((char *)tx_buff, "PPM=%ld\n", data_r.ppm);
+	ret = HAL_UART_Transmit(&huart1, tx_buff, strlen((char*)tx_buff), 1000);
+
+	return ret;
+}
+
+void communicating_handle()
+{
+	if (disp_flag) {
+		lcd_set_cursor(&hlcd, 0, 0);
+		lcd_printf(&hlcd, "Communicating ...");
+		disp_flag = false;
+	}
+	if (uart_flag)
+	{
+		uart_flag = false;
+
+		// Request Connect
+		if (!strcmp((char *)rx_buffer, "AT01")) {
+			send_OK();
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			return;
+		}
+
+		// Close Connect
+		if (!strcmp((char *)rx_buffer, "AT04")) {
+			send_OK();
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			stateDevice = IDLE;
+			lcd_clear_display(&hlcd);
+			return;
+		}
+
+		// TEST
+		if (!strcmp((char *)rx_buffer, "AT05")) {
+//			send_OK();
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			send_test();
+			return;
+		}
+
+		// all Data
+		if (!strcmp((char *)rx_buffer, "AT06")) {
+			send_allData();
+			return;
+		}
+
+		// set Time
+		if (!strcmp((char *)rx_buffer, "AT07")) {
+			send_OK();
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			return;
+		}
+
+		// set Day
+		if (!strcmp((char *)rx_buffer, "AT07")) {
+			send_OK();
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			return;
+		}
+	}
+}
+
+void uart_handle()
+{
+	if (uart_flag) {
+		if (stateDevice == IDLE) {
+			if (!strcmp((char *)rx_buffer, "AT01")) {
+				lcd_clear_display(&hlcd);
+				stateDevice = COMMUNICATING;
+				disp_flag = true;
+				return;
+			}
+			else
+			{
+				memset((char *)rx_buffer, '\0', sizeofBuff);
+				HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+				return;
+			}
+		}
+
+		if (stateDevice == COMMUNICATING) {
+
+		}
+	}
+}
 
 
 /* USER CODE END 0 */
@@ -347,13 +644,15 @@ int main(void)
   MX_ADC1_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+
   lcd_init(&hlcd, &hi2c2, LCD_ADDR_DEFAULT);
   button_init(&button1, GPIOA, GPIO_PIN_8);
   MQSensor_Init(&MQSensor, HT_CTRL_GPIO_Port, HT_CTRL_Pin, &hadc1, ADC_CHANNEL_0);
 
   stateDevice = IDLE;
 
-//  HAL_UART_Receive_IT(&huart1, );
+  disp_flag = true;
+  HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
 
   /* USER CODE END 2 */
 
@@ -365,6 +664,7 @@ int main(void)
 	  switch (stateDevice) {
 	  	case IDLE:
 	  		idle_display();
+	  		uart_handle();
 	  		break;
 		case HEATING:
 			heating_display();
@@ -376,6 +676,7 @@ int main(void)
 			warning();
 			measuring_display(true);
 			store_data();
+			break;
 		case COMMUNICATING:
 			communicating_handle();
 			break;
@@ -578,25 +879,46 @@ static void MX_RTC_Init(void)
   }
 
   /* USER CODE BEGIN Check_RTC_BKUP */
+  if (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR1) != RTC_BKP_SET_TIME)
+  {
+	  	sTime.Hours = 18;
+	    sTime.Minutes = 5;
+	    sTime.Seconds = 0;
 
+	    if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK)
+	    {
+	      Error_Handler();
+	    }
+	    DateToUpdate.WeekDay = RTC_WEEKDAY_SATURDAY;
+	    DateToUpdate.Month = RTC_MONTH_SEPTEMBER;
+	    DateToUpdate.Date = 23;
+	    DateToUpdate.Year = 23;
+
+	    if (HAL_RTC_SetDate(&hrtc, &DateToUpdate, RTC_FORMAT_BIN) != HAL_OK)
+	    {
+	      Error_Handler();
+	    }
+  }
+
+  HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR1, RTC_BKP_SET_TIME);
   /* USER CODE END Check_RTC_BKUP */
 
   /** Initialize RTC and set the Time and Date
   */
-  sTime.Hours = 0x0;
-  sTime.Minutes = 0x0;
-  sTime.Seconds = 0x0;
+  sTime.Hours = 17;
+  sTime.Minutes = 56;
+  sTime.Seconds = 0;
 
-  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK)
   {
     Error_Handler();
   }
-  DateToUpdate.WeekDay = RTC_WEEKDAY_MONDAY;
-  DateToUpdate.Month = RTC_MONTH_JANUARY;
-  DateToUpdate.Date = 0x1;
-  DateToUpdate.Year = 0x0;
+  DateToUpdate.WeekDay = RTC_WEEKDAY_SATURDAY;
+  DateToUpdate.Month = RTC_MONTH_SEPTEMBER;
+  DateToUpdate.Date = 23;
+  DateToUpdate.Year = 23;
 
-  if (HAL_RTC_SetDate(&hrtc, &DateToUpdate, RTC_FORMAT_BCD) != HAL_OK)
+  if (HAL_RTC_SetDate(&hrtc, &DateToUpdate, RTC_FORMAT_BIN) != HAL_OK)
   {
     Error_Handler();
   }
@@ -657,7 +979,17 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, BUZZER_Pin|HT_CTRL_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : LED_Pin */
+  GPIO_InitStruct.Pin = LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : BUZZER_Pin HT_CTRL_Pin */
   GPIO_InitStruct.Pin = BUZZER_Pin|HT_CTRL_Pin;
@@ -691,6 +1023,16 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   if (GPIO_Pin == GPIO_PIN_8) {
 
   }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  /* Prevent unused argument(s) compilation warning */
+  UNUSED(huart);
+  /* NOTE: This function should not be modified, when the callback is needed,
+           the HAL_UART_RxCpltCallback could be implemented in the user file
+   */
+  uart_flag = true;
 }
 
 
