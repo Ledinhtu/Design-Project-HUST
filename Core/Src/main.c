@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <math.h>
+#include <stdlib.h>
 
 /* USER CODE END Includes */
 
@@ -137,6 +138,10 @@ uint8_t arr_r[10];
 Sensor_Data_Typdef data_r;
 Sensor_Data_Typdef data_w;
 
+uint8_t setTime_flag=0;
+uint8_t setDate_flag=0;
+uint8_t setLevel_flag=0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -190,6 +195,8 @@ HAL_StatusTypeDef Flash_Read_Array(uint32_t address, uint8_t *arr,  uint16_t len
 HAL_StatusTypeDef Flash_Read_Struct(uint32_t address, Sensor_Data_Typdef *data);
 
 HAL_StatusTypeDef sendUart(UART_HandleTypeDef *huart, const char* str, ...);
+HAL_StatusTypeDef setTime(RTC_HandleTypeDef *hrtc, char* str);
+HAL_StatusTypeDef setDate(RTC_HandleTypeDef *hrtc, char* str);
 
 /* USER CODE END PFP */
 
@@ -660,6 +667,32 @@ HAL_StatusTypeDef send_test()
 #endif /* SEND_TEST */
 }
 
+HAL_StatusTypeDef setTime(RTC_HandleTypeDef *hrtc, char* str)
+{
+	RTC_TimeTypeDef sTime = {0};
+	char* token = strtok(str, " ");
+	sTime.Hours = atoi(token);
+	token = strtok(NULL, " ");
+	sTime.Minutes = atoi(token);
+	token = strtok(NULL, " ");
+	sTime.Seconds = atoi(token);
+
+	return HAL_RTC_SetTime(hrtc, &sTime, RTC_FORMAT_BIN);
+}
+
+HAL_StatusTypeDef setDate(RTC_HandleTypeDef *hrtc, char* str)
+{
+	RTC_DateTypeDef DateToUpdate = {0};
+	char* token = strtok(str, " ");
+	DateToUpdate.Year = atoi(token);
+	token = strtok(NULL, " ");
+	DateToUpdate.Month = atoi(token);
+	token = strtok(NULL, " ");
+	DateToUpdate.Date = atoi(token);
+
+	return HAL_RTC_SetDate(hrtc, &DateToUpdate, RTC_FORMAT_BIN);
+}
+
 void communicating_handle()
 {
 	if (disp_flag) {
@@ -670,6 +703,39 @@ void communicating_handle()
 	if (uart_flag)
 	{
 		uart_flag = false;
+
+		if (strlen((char *)rx_buffer) > 5)
+		{
+			HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+
+			if (setLevel_flag) {
+				setLevel_flag = 0;
+				var_EL = atoi((char *)rx_buffer);
+				memset((char *)rx_buffer, '\0', sizeofBuff);
+				sendUart(&huart1, "AT00\n");
+				return;
+			}
+
+			if (setTime_flag) {
+				setTime_flag = 0;
+				if (setTime(&hrtc, (char *)rx_buffer)) {
+					sendUart(&huart1, "AT02\n");
+					return;
+				}
+				sendUart(&huart1, "AT00\n");
+				return;
+			}
+
+			if (setDate_flag) {
+				setDate_flag = 0;
+				if (setDate(&hrtc, (char *)rx_buffer)) {
+					sendUart(&huart1, "AT02\n");
+					return;
+				}
+				sendUart(&huart1, "AT00\n");
+				return;
+			}
+		}
 
 		// Request Connect
 		if (!strcmp((char *)rx_buffer, "AT01")) {
@@ -709,16 +775,27 @@ void communicating_handle()
 		// set Time
 		if (!strcmp((char *)rx_buffer, "AT07")) {
 			send_OK();
+			setTime_flag = 1;
 			memset((char *)rx_buffer, '\0', sizeofBuff);
-			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 9);
 			return;
 		}
 
 		// set Day
-		if (!strcmp((char *)rx_buffer, "AT07")) {
+		if (!strcmp((char *)rx_buffer, "AT08")) {
 			send_OK();
+			setDate_flag = 1;
 			memset((char *)rx_buffer, '\0', sizeofBuff);
-			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 9);
+			return;
+		}
+
+		// set Threshold
+		if (!strcmp((char *)rx_buffer, "AT09")) {
+			send_OK();
+			setLevel_flag = 1;
+			memset((char *)rx_buffer, '\0', sizeofBuff);
+			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 7);
 			return;
 		}
 
@@ -731,6 +808,8 @@ void communicating_handle()
 			ret = HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
 			return;
 		}
+
+		HAL_UART_Receive_IT(&huart1, rx_buffer, 5);
 	}
 }
 
